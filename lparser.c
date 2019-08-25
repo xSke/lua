@@ -595,6 +595,8 @@ static int block_follow (LexState *ls, int withuntil) {
     case TK_ELSE: case TK_ELSEIF:
     case TK_END: case TK_EOS:
       return 1;
+    case TK_EOL:  /* EOL indicates end of short if */
+      return 1;
     case TK_UNTIL: return withuntil;
     default: return 0;
   }
@@ -1003,7 +1005,7 @@ static BinOpr getbinopr (int op) {
     case '%': return OPR_MOD;
     case '^': return OPR_POW;
     case TK_CONCAT: return OPR_CONCAT;
-    case TK_NE: return OPR_NE;
+    case TK_NE: case TK_NE2: return OPR_NE;
     case TK_EQ: return OPR_EQ;
     case '<': return OPR_LT;
     case TK_LE: return OPR_LE;
@@ -1163,6 +1165,37 @@ static void assignment (LexState *ls, struct LHS_assign *lh, int nvars) {
   }
   init_exp(&e, VNONRELOC, ls->fs->freereg-1);  /* default assignment */
   luaK_storevar(ls->fs, &lh->v, &e);
+}
+
+
+static void compound (LexState *ls, expdesc *v) {
+    int i, line, extra;
+    FuncState *fs = ls->fs;
+    expdesc e1 = *v, e2;
+    /* compound -> ( `+=' | `-=' | `*=' | `/=' | `%=' ) expression */
+    BinOpr op = ls->t.token == TK_ADDE ? OPR_ADD :
+                ls->t.token == TK_SUBE ? OPR_SUB :
+                ls->t.token == TK_MULE ? OPR_MUL :
+                ls->t.token == TK_DIVE ? OPR_DIV :
+                ls->t.token == TK_MODE ? OPR_MOD :
+                OPR_NOBINOPR;
+    extra = fs->freereg - fs->nactvar;
+    for (i = 0; i < extra; ++i)
+        new_localvarliteral(ls, "(for compound)");
+    adjustlocalvars(ls, extra);
+
+    luaX_next(ls);
+    line = ls->linenumber;
+
+    enterlevel(ls);
+    luaK_infix(fs, op, &e1);
+    expr(ls, &e2);
+    luaK_posfix(fs, op, &e1, &e2, line);
+    leavelevel(ls);
+
+    luaK_exp2nextreg(fs, &e1);
+    luaK_setoneret(ls->fs, &e1);
+    luaK_storevar(ls->fs, v, &e1);
 }
 
 
@@ -1371,15 +1404,23 @@ static void forstat (LexState *ls, int line) {
 }
 
 
-static void test_then_block (LexState *ls, int *escapelist) {
+static int test_then_block (LexState *ls, int *escapelist) {
   /* test_then_block -> [IF | ELSEIF] cond THEN block */
   BlockCnt bl;
   FuncState *fs = ls->fs;
   expdesc v;
   int jf;  /* instruction to skip 'then' code (if condition is false) */
+  int line = ls->linenumber;
+  int short_if = (ls->t.token == TK_IF);  /* if TK_IF, can be a short IF */
   luaX_next(ls);  /* skip IF or ELSEIF */
+  luaX_trackbraces(ls);  /* track braces for short IF */
   expr(ls, &v);  /* read condition */
-  checknext(ls, TK_THEN);
+  short_if &= ls->t.token != TK_THEN && ls->t.token != TK_EOS
+           && ls->braces == 0 && line == ls->linenumber;
+  if (short_if)
+    ls->emiteol = 1;
+  else
+    checknext(ls, TK_THEN);
   if (ls->t.token == TK_GOTO || ls->t.token == TK_BREAK) {
     luaK_goiffalse(ls->fs, &v);  /* will jump to label if condition is true */
     enterblock(fs, &bl, 0);  /* must enter block before 'goto' */
@@ -1387,7 +1428,7 @@ static void test_then_block (LexState *ls, int *escapelist) {
     skipnoopstat(ls);  /* skip other no-op statements */
     if (block_follow(ls, 0)) {  /* 'goto' is the entire block? */
       leaveblock(fs);
-      return;  /* and that is it */
+      return short_if;  /* and that is it */
     }
     else  /* must skip over 'then' part if condition is false */
       jf = luaK_jump(fs);
@@ -1403,6 +1444,7 @@ static void test_then_block (LexState *ls, int *escapelist) {
       ls->t.token == TK_ELSEIF)  /* followed by 'else'/'elseif'? */
     luaK_concat(fs, escapelist, luaK_jump(fs));  /* must jump over it */
   luaK_patchtohere(fs, jf);
+  return short_if;
 }
 
 
@@ -1410,12 +1452,19 @@ static void ifstat (LexState *ls, int line) {
   /* ifstat -> IF cond THEN block {ELSEIF cond THEN block} [ELSE block] END */
   FuncState *fs = ls->fs;
   int escapelist = NO_JUMP;  /* exit list for finished parts */
-  test_then_block(ls, &escapelist);  /* IF cond THEN block */
+  int short_if = test_then_block(ls, &escapelist);  /* IF cond THEN block */
   while (ls->t.token == TK_ELSEIF)
     test_then_block(ls, &escapelist);  /* ELSEIF cond THEN block */
   if (testnext(ls, TK_ELSE))
     block(ls);  /* `else' part */
-  check_match(ls, TK_END, TK_IF, line);
+  if (!short_if)
+    check_match(ls, TK_END, TK_IF, line);
+  else if (ls->t.token == TK_EOL || ls->t.token == TK_EOS)
+    luaX_next(ls);  /* eat EOL or EOS */
+  else if (block_follow(ls, 1))
+    ls->emiteol = 0;  /* close the short if */
+  else
+    check_match(ls, TK_EOL, TK_IF, line);  /* we expected EOL */
   luaK_patchtohere(fs, escapelist);  /* patch escape list to 'if' end */
 }
 
@@ -1478,11 +1527,17 @@ static void funcstat (LexState *ls, int line) {
 
 
 static void exprstat (LexState *ls) {
-  /* stat -> func | assignment */
+  /* stat -> func | compound | assignment */
   FuncState *fs = ls->fs;
   struct LHS_assign v;
   suffixedexp(ls, &v.v);
-  if (ls->t.token == '=' || ls->t.token == ',') { /* stat -> assignment ? */
+  if (ls->t.token == TK_ADDE || ls->t.token == TK_SUBE ||
+    ls->t.token == TK_MULE || ls->t.token == TK_DIVE ||
+    ls->t.token == TK_MODE) {
+    v.prev = NULL;
+    compound(ls, &v.v);
+  }
+  else if (ls->t.token == '=' || ls->t.token == ',') { /* stat -> assignment ? */
     v.prev = NULL;
     assignment(ls, &v, 1);
   }

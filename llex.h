@@ -26,8 +26,9 @@ enum RESERVED {
   TK_GOTO, TK_IF, TK_IN, TK_LOCAL, TK_NIL, TK_NOT, TK_OR, TK_REPEAT,
   TK_RETURN, TK_THEN, TK_TRUE, TK_UNTIL, TK_WHILE,
   /* other terminal symbols */
-  TK_CONCAT, TK_DOTS, TK_EQ, TK_GE, TK_LE, TK_NE, TK_DBCOLON, TK_EOS,
-  TK_NUMBER, TK_NAME, TK_STRING
+  TK_CONCAT, TK_DOTS, TK_EQ, TK_GE, TK_LE, TK_NE, TK_NE2,
+  TK_ADDE, TK_SUBE, TK_MULE, TK_DIVE, TK_MODE, TK_DBCOLON, TK_EOS,
+  TK_NUMBER, TK_NAME, TK_STRING, TK_EOL
 };
 
 /* number of reserved words */
@@ -51,7 +52,10 @@ typedef struct Token {
 typedef struct LexState {
   int current;  /* current character (charint) */
   int linenumber;  /* input line counter */
+  int atsol;  /* are we at start of line? */
+  int emiteol;  /* should EOL be emitted? */
   int lastline;  /* line of last token `consumed' */
+  int braces;  /* braces context */
   Token t;  /* current token */
   Token lookahead;  /* look ahead token */
   struct FuncState *fs;  /* current function (parser) */
@@ -73,6 +77,6 @@ LUAI_FUNC void luaX_next (LexState *ls);
 LUAI_FUNC int luaX_lookahead (LexState *ls);
 LUAI_FUNC l_noret luaX_syntaxerror (LexState *ls, const char *s);
 LUAI_FUNC const char *luaX_token2str (LexState *ls, int token);
-
+LUAI_FUNC void luaX_trackbraces (LexState *ls);
 
 #endif

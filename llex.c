@@ -38,8 +38,9 @@ static const char *const luaX_tokens [] = {
     "end", "false", "for", "function", "goto", "if",
     "in", "local", "nil", "not", "or", "repeat",
     "return", "then", "true", "until", "while",
-    "..", "...", "==", ">=", "<=", "~=", "::", "<eof>",
-    "<number>", "<name>", "<string>"
+    "..", "...", "==", ">=", "<=", "~=", "!=",
+    "+=", "-=", "*=", "/=", "%=", "::", "<eof>",
+    "<number>", "<name>", "<string>", "<eol>"
 };
 
 
@@ -87,6 +88,9 @@ const char *luaX_token2str (LexState *ls, int token) {
   }
 }
 
+void luaX_trackbraces (LexState *ls) {
+    ls->braces = ls->t.token == '(' ? 1 : -1;
+}
 
 static const char *txtToken (LexState *ls, int token) {
   switch (token) {
@@ -153,6 +157,7 @@ static void inclinenumber (LexState *ls) {
     next(ls);  /* skip `\n\r' or `\r\n' */
   if (++ls->linenumber >= MAX_INT)
     luaX_syntaxerror(ls, "chunk has too many lines");
+  ls->atsol = 1;
 }
 
 
@@ -165,7 +170,10 @@ void luaX_setinput (lua_State *L, LexState *ls, ZIO *z, TString *source,
   ls->z = z;
   ls->fs = NULL;
   ls->linenumber = 1;
+  ls->atsol = 1;
+  ls->emiteol = 0;
   ls->lastline = 1;
+  ls->braces = -1;
   ls->source = source;
   ls->envn = luaS_new(L, LUA_ENV);  /* create env name */
   luaS_fix(ls->envn);  /* never collect this name */
@@ -401,18 +409,23 @@ static void read_string (LexState *ls, int del, SemInfo *seminfo) {
 static int llex (LexState *ls, SemInfo *seminfo) {
   luaZ_resetbuffer(ls->buff);
   for (;;) {
+    int atsol = ls->atsol;
+    ls->atsol = 0;  /* assume no longer at start of line */
     switch (ls->current) {
       case '\n': case '\r': {  /* line breaks */
         inclinenumber(ls);
+        if (ls->emiteol) { ls->emiteol = 0; return TK_EOL; }
         break;
       }
       case ' ': case '\f': case '\t': case '\v': {  /* spaces */
         next(ls);
+        ls->atsol = atsol;  /* still at sol if we already were. */
         break;
       }
-      case '-': {  /* '-' or '--' (comment) */
+      case '-': {  /* '-' or '-=' or '--' (comment) */
         next(ls);
-        if (ls->current != '-') return '-';
+        if (ls->current == '=') { next(ls); return TK_SUBE; }
+        else if (ls->current != '-') return '-';
         /* else is a comment */
         next(ls);
         if (ls->current == '[') {  /* long comment? */
@@ -428,6 +441,17 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         while (!currIsNewline(ls) && ls->current != EOZ)
           next(ls);  /* skip until end of line (or end of file) */
         break;
+      }
+      case '/': {
+        next(ls);
+        if (ls->current == '=') { next(ls); return TK_DIVE; }
+        else if (ls->current != '/') return '/';
+      }
+      case '+': case '*': case '%': {  /* '+', '*', '%' or '+=', '*=', '%=' */
+        int c = ls->current;
+        next(ls);
+        if (ls->current != '=') return c;
+        else { next(ls); return c == '+' ? TK_ADDE : c == '*' ? TK_MULE : TK_MODE; }
       }
       case '[': {  /* long string or simply '[' */
         int sep = skip_sep(ls);
@@ -453,10 +477,11 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         if (ls->current != '=') return '>';
         else { next(ls); return TK_GE; }
       }
-      case '~': {
+      case '~': case '!': {
+        int c = ls->current;
         next(ls);
-        if (ls->current != '=') return '~';
-        else { next(ls); return TK_NE; }
+        if (ls->current != '=') return c;
+        else { next(ls); return c == '~' ? TK_NE : TK_NE2; }
       }
       case ':': {
         next(ls);
@@ -502,6 +527,8 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         }
         else {  /* single-char tokens (+ - / ...) */
           int c = ls->current;
+          ls->braces += c == ')' ? -1 :  /* handle brace count for short if */
+                        c == '(' ? ls->braces > 0 ? 1 : -1 : 0;
           next(ls);
           return c;
         }
