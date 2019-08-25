@@ -877,10 +877,10 @@ static int loadlib (lua_State *L) {
   static const luaL_Reg libs[] = {
     {"_G", luaopen_base},
     {"coroutine", luaopen_coroutine},
-    {"debug", luaopen_debug},
-    {"io", luaopen_io},
-    {"os", luaopen_os},
-    {"math", luaopen_math},
+//    {"debug", luaopen_debug},
+//    {"io", luaopen_io},
+//    {"os", luaopen_os},
+//    {"math", luaopen_math},
     {"string", luaopen_string},
     {"table", luaopen_table},
     {NULL, NULL}
